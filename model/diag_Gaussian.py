@@ -36,7 +36,7 @@ def grad_model(system, Xi, z):
     return jacrev(model, 2)(system, Xi, z)
 
 
-# function to map noise to model parameters
+# invertible, differentiable function to map noise to model parameters
 @partial(jit, static_argnums=(0,))
 def T(transform, y, lmbda):
     # weights and biases of nn
@@ -53,15 +53,37 @@ def batch_T(transform, y_batch, lmbda):
     return vmap(T, (None, 0, None))(transform, y_batch, lmbda)
 
 
-# entropy of posterior distribution
-@jit
-def log_det(lmbda):
+# Jacobian of transform w.r.t. base distribution
+@partial(jit, static_argnums=(0,))
+def jac_T(transform, y, lmbda):
+    return jacfwd(T, 1)(transform, y, lmbda)
+
+
+# log of absolute value of determinant of Jacobian of T
+@partial(jit, static_argnums=(0,))
+def log_det_old(transform, y, lmbda):
+    # return jnp.log(jnp.abs(jnp.linalg.det(jac_T(transform, y, lmbda))))
+    # return jnp.sum(jnp.log(jnp.abs(jnp.linalg.eigvals(jac_T(transform, y, lmbda)))))
+    return jnp.sum(jnp.log(jnp.abs(jnp.diag(jac_T(transform, y, lmbda)))))
+
+
+@partial(jit, static_argnums=(0,))
+def log_det(transform, y, lmbda):
+    # unpack variational parameters
     mu, log_s = lmbda[:len(lmbda) // 2], lmbda[len(lmbda) // 2:]
-    return jnp.sum(jnp.log(jnp.exp2(log_s)))
+
+    # convert to z
+    z = mu + jnp.exp2(log_s) * y
+
+    # compute log abs det
+    eigs = jnp.diag(jacfwd(transform)(z)) * jnp.exp2(log_s)
+    return jnp.sum(jnp.log(jnp.abs(eigs)))
 
 
 # gradient of entropy of approximating distribution w.r.t. lmbda
-grad_log_det = jit(jacfwd(log_det))
+@partial(jit, static_argnums=(0,))
+def grad_log_det(transform, y, lmbda):
+    return jacrev(log_det, 2)(transform, y, lmbda)
 
 
 # evaluate log prior
@@ -220,7 +242,7 @@ class ODE:
         self.d = len(self.prior_mean)
 
         # initial parameter guess
-        self.z = np.random.randn(self.d) / 100.
+        self.z = np.random.randn(self.d) / 10.
         self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 100.))
 
     # negative log likelihood
@@ -243,8 +265,11 @@ class ODE:
         y = np.random.randn(n_sample, self.d)
 
         # entropy
-        self.ELBO = -np.nan_to_num(log_det(self.lmbda))
+        self.ELBO = 0.
         for yi in y:
+
+            # entropy
+            self.ELBO -= np.nan_to_num(log_det(self.transform, yi, self.lmbda)) / n_sample
 
             # prior
             self.ELBO += np.nan_to_num(log_prior(self.transform,
@@ -393,7 +418,7 @@ class ODE:
             nll_prev = np.copy(self.NLL)
             print("NLL convergence: {:.3f}".format(convergence))
 
-    def fit_posterior(self, n_sample=1, lr=1e-3, beta1=0.9, beta2=0.999, epsilon=1e-8, max_epochs=1000, tol=1e-3,
+    def fit_posterior(self, n_sample=1, lr=1e-2, beta1=0.9, beta2=0.999, epsilon=1e-8, max_epochs=1000, tol=1e-3,
                       patience=3):
         """
         ADAM optimizer for minimizing a function.
@@ -463,11 +488,14 @@ class ODE:
                 # sample noise
                 y = np.random.randn(n_sample, self.d)
 
-                # gradient of entropy
-                gradient = -np.nan_to_num(grad_log_det(self.lmbda)) / len(self.X)
-
                 # stochastic evaluation of gradient
                 for yi in y:
+
+                    # gradient of entropy
+                    gradient = -np.nan_to_num(grad_log_det(self.transform,
+                                                           yi,
+                                                           self.lmbda)) / len(self.X) / n_sample
+
                     # gradient of log posterior
                     grad_val = grad_log_posterior(self.system,
                                                   self.transform,
@@ -477,8 +505,9 @@ class ODE:
                                                   self.alpha, self.beta, N=len(self.X))
 
                     # ignore value for unstable parameter samples
-                    if np.nanmax(np.abs(grad_val)) < 1000:
-                        gradient += np.nan_to_num(grad_val) / n_sample
+                    # if not all(np.isnan(grad_val)):
+                    #     if np.nanmax(np.abs(grad_val)) < 1000:
+                    gradient += np.nan_to_num(grad_val) / n_sample
 
                 # moment estimation
                 m = beta1 * m + (1 - beta1) * gradient
@@ -557,8 +586,8 @@ class ODE:
         # print("beta:", self.beta)
 
         # update alpha
-        # self.alpha = 1. / np.mean((z - self.prior_mean) ** 2, 0)
-        self.alpha = self.d * n_sample / np.sum((z - self.prior_mean) ** 2)
+        self.alpha = 1. / np.mean((z - self.prior_mean) ** 2, 0)
+        # self.alpha = self.d * n_sample / np.sum((z - self.prior_mean) ** 2)
         # print("alpha:", self.alpha)
 
     def estimate_evidence(self, n_sample=512):
