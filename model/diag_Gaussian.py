@@ -489,10 +489,11 @@ class ODE:
                 y = np.random.randn(n_sample, self.d)
 
                 # stochastic evaluation of gradient
+                gradient = 0.
                 for yi in y:
 
                     # gradient of entropy
-                    gradient = -np.nan_to_num(grad_log_det(self.transform,
+                    gradient -= np.nan_to_num(grad_log_det(self.transform,
                                                            yi,
                                                            self.lmbda)) / len(self.X) / n_sample
 
