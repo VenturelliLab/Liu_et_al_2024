@@ -35,6 +35,10 @@ def model(system, Xi, z):
 def grad_model(system, Xi, z):
     return jacrev(model, 2)(system, Xi, z)
 
+# outer product
+@jit
+def outer(beta, G):
+    return jnp.einsum('k,ki,kj->ij', beta, G, G)
 
 # invertible, differentiable function to map noise to model parameters
 @partial(jit, static_argnums=(0,))
@@ -245,18 +249,56 @@ class ODE:
         self.z = np.random.randn(self.d) / 10.
         self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 100.))
 
-    # negative log likelihood
-    def nll(self):
+    # reinitialize parameters
+    def init_params(self,):
+
+        # initial parameter guess
+        self.z = np.random.randn(self.d) / 10.
+        self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 100.))
+
+    # negative log posterior
+    def nlp(self, z):
 
         # prior
-        self.NLL = np.nan_to_num(log_prior_z(self.transform, self.prior_mean, self.z, self.alpha))
+        self.NLP = np.nan_to_num(log_prior_z(self.transform, self.prior_mean, z, self.alpha))
 
         # likelihood
         for Xi in self.X:
-            self.NLL += np.nan_to_num(log_likelihood_z(self.system, self.transform, self.z, Xi, self.beta))
+            self.NLP += np.nan_to_num(log_likelihood_z(self.system, self.transform, z, Xi, self.beta))
 
         # return NLP
-        return self.NLL
+        return self.NLP
+
+    # gradient of negative log posterior
+    def grad_nlp(self, z):
+
+        # prior
+        grad_NLP = np.nan_to_num(grad_log_prior_z(self.transform, self.prior_mean, z, self.alpha))
+
+        # likelihood
+        for Xi in self.X:
+            grad_NLP += np.nan_to_num(grad_log_likelihood_z(self.system, self.transform, z, Xi, self.beta))
+
+        # return NLP
+        return grad_NLP
+
+    # gradient of negative log posterior
+    def hess_nlp(self, z):
+
+        # prior
+        hess_NLP = np.diag(self.alpha)
+
+        # likelihood
+        for Xi in self.X:
+
+            # Jacobian of model
+            Gi = grad_model(self.system, Xi, z)
+
+            # outer product approximation of Hessian
+            hess_NLP += outer(self.beta, Gi)
+
+        # return NLP
+        return hess_NLP
 
     # evidence lower bound
     def elbo(self, n_sample=21):
@@ -522,7 +564,7 @@ class ODE:
                 # take step
                 self.lmbda -= lr * m_hat / (np.sqrt(v_hat) + epsilon)
 
-    def fit_posterior_EM(self, n_sample_sgd=1, n_sample_hypers=32, n_sample_evidence=512, patience=3):
+    def fit_posterior_EM_1(self, n_sample_sgd=1, n_sample_hypers=32, n_sample_evidence=512, patience=3):
 
         # estimate model evidence
         print("Computing model evidence...")
@@ -546,6 +588,72 @@ class ODE:
             print("Computing model evidence...")
             self.estimate_evidence(n_sample=n_sample_evidence)
             print("Log evidence: {:.3f}".format(self.log_evidence))
+
+            # check convergence
+            if self.log_evidence > previdence:
+                fails = 0
+                previdence = np.copy(self.log_evidence)
+            else:
+                fails += 1
+
+    def fit_posterior_EM(self, n_sample_sgd=1, n_sample_hypers=100, n_sample_evidence=100, trials=3, patience=3, lr=1e-3,
+                         max_iterations=100):
+
+        # initialize parameters over trials
+        if trials > 0:
+            param_dict = {t: {} for t in range(trials)}
+            for trial in range(trials):
+                # initialize parameters
+                print(f"Trial {trial + 1}")
+                self.init_params()
+
+                # estimate parameters using gradient descent
+                z = minimize(fun=self.nlp,
+                             jac=self.grad_nlp,
+                             hess=self.hess_nlp,
+                             x0=self.z,
+                             method='Newton-CG',
+                             callback=self.callback).x
+
+                # save optimized parameter values and associated loss
+                param_dict[trial]["NLP"] = self.NLP
+                param_dict[trial]["params"] = z
+
+            # pick the best parameter set
+            NLPs = [param_dict[trial]["NLP"] for trial in range(trials)]
+            best_trial = np.argmin(NLPs)
+            print("\nLoading model with NLP: {:.3f}".format(NLPs[best_trial]))
+            self.z = param_dict[best_trial]["params"]
+            self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 100.))
+            del param_dict
+        else:
+            # init params
+            self.init_params()
+
+        # optimize parameter posterior
+        print("Updating posterior...")
+        self.fit_posterior(n_sample_sgd, lr=lr)
+
+        # init evidence, fail count, iteration count
+        previdence = -np.inf
+        fails = 0
+        t = 0
+        while fails < patience and t < max_iterations:
+
+            # update iteration count
+            t += 1
+
+            # update prior and measurement precision estimate
+            print("Updating hyperparameters...")
+            self.update_hypers(n_sample=n_sample_hypers)
+
+            # optimize parameter posterior
+            print("Updating posterior...")
+            self.fit_posterior(n_sample_sgd, lr=lr)
+
+            # update evidence
+            print("Computing model evidence...")
+            self.estimate_evidence(n_sample=n_sample_evidence)
 
             # check convergence
             if self.log_evidence > previdence:
