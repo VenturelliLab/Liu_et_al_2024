@@ -439,7 +439,7 @@ class ODE:
             nll_prev = np.copy(self.NLL)
             print("NLL convergence: {:.3f}".format(convergence))
 
-    def fit_posterior(self, n_sample=1, lr=1e-4, beta1=0.5, beta2=0.5, epsilon=1e-8, max_epochs=1000, tol=1e-5,
+    def fit_posterior(self, n_sample=1, lr=1e-3, beta1=0.9, beta2=0.999, epsilon=1e-8, max_epochs=1000, tol=1e-4,
                       patience=3):
         """
         ADAM optimizer for minimizing a function.
@@ -546,7 +546,7 @@ class ODE:
         print("Loss: {:.3f}".format(self.NLP))
 
     def fit_posterior_EM(self, n_sample_sgd=3, n_sample_hypers=1000, n_sample_evidence=1000,
-                         trials=3, patience=1, lr=1e-4, max_iterations=100):
+                         trials=3, patience=1, lr=1e-3, max_iterations=100):
 
         # initialize parameters over trials
         if trials > 0:
