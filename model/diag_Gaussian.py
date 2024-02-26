@@ -27,7 +27,7 @@ def model(system, Xi, z):
     t_hat = odeint(system, jnp.array(x[0]), t_span, z)
 
     # t_hat is the model estimate of observed variable t
-    return t_hat[1:]
+    return jnp.nan_to_num(t_hat[-1])
 
 
 # gradient of model w.r.t. latent variables z
@@ -36,61 +36,50 @@ def grad_model(system, Xi, z):
     return jacrev(model, 2)(system, Xi, z)
 
 
+# outer product for approximating Hessian
+@jit
+def outer(beta, G):
+    return jnp.einsum('k,ki,kj->ij', beta, G, G)
+
 # invertible, differentiable function to map noise to model parameters
-@partial(jit, static_argnums=(0,))
-def T(transform, y, lmbda):
+@jit
+def T(y, lmbda):
     # weights and biases of nn
-    mu, log_s = lmbda[:len(lmbda) // 2], lmbda[len(lmbda) // 2:]
-
-    # convert to z
-    z = transform(mu + jnp.exp2(log_s) * y)
-
-    return z
-
-
-@partial(jit, static_argnums=(0,))
-def batch_T(transform, y_batch, lmbda):
-    return vmap(T, (None, 0, None))(transform, y_batch, lmbda)
-
-
-# Jacobian of transform w.r.t. base distribution
-@partial(jit, static_argnums=(0,))
-def jac_T(transform, y, lmbda):
-    return jacfwd(T, 1)(transform, y, lmbda)
-
-
-# log of absolute value of determinant of Jacobian of T
-@partial(jit, static_argnums=(0,))
-def log_det_old(transform, y, lmbda):
-    # return jnp.log(jnp.abs(jnp.linalg.det(jac_T(transform, y, lmbda))))
-    # return jnp.sum(jnp.log(jnp.abs(jnp.linalg.eigvals(jac_T(transform, y, lmbda)))))
-    return jnp.sum(jnp.log(jnp.abs(jnp.diag(jac_T(transform, y, lmbda)))))
-
-
-@partial(jit, static_argnums=(0,))
-def log_det(transform, y, lmbda):
-    # unpack variational parameters
     mu, log_s = lmbda[:len(lmbda) // 2], lmbda[len(lmbda) // 2:]
 
     # convert to z
     z = mu + jnp.exp2(log_s) * y
 
+    return z
+
+
+@jit
+def batch_T(y_batch, lmbda):
+    return vmap(T, (0, None))(y_batch, lmbda)
+
+
+@jit
+def log_det(y, lmbda):
+
+    # unpack variational parameters
+    mu, log_s = lmbda[:len(lmbda) // 2], lmbda[len(lmbda) // 2:]
+
     # compute log abs det
-    eigs = jnp.diag(jacfwd(transform)(z)) * jnp.exp2(log_s)
-    return jnp.sum(jnp.log(jnp.abs(eigs)))
+    return jnp.sum(jnp.log(jnp.abs(jnp.exp2(log_s))))
 
 
 # gradient of entropy of approximating distribution w.r.t. lmbda
-@partial(jit, static_argnums=(0,))
-def grad_log_det(transform, y, lmbda):
-    return jacrev(log_det, 2)(transform, y, lmbda)
+@jit
+def grad_log_det(y, lmbda):
+    return jacrev(log_det, -1)(y, lmbda)
 
 
 # evaluate log prior
-@partial(jit, static_argnums=(0,))
-def log_prior(transform, z_prior, y, lmbda, alpha):
+@jit
+def log_prior(z_prior, y, lmbda, alpha):
+
     # map to sample from posterior
-    z = T(transform, y, lmbda)
+    z = T(y, lmbda)
 
     # prior
     lp = jnp.sum(alpha * (z - z_prior) ** 2) / 2.
@@ -99,37 +88,39 @@ def log_prior(transform, z_prior, y, lmbda, alpha):
 
 
 # gradient of log prior
-@partial(jit, static_argnums=(0,))
-def grad_log_prior(transform, z_prior, y, lmbda, alpha):
-    return jacrev(log_prior, 3)(transform, z_prior, y, lmbda, alpha)
+@jit
+def grad_log_prior(z_prior, y, lmbda, alpha):
+    return jacrev(log_prior, 2)(z_prior, y, lmbda, alpha)
 
 
 # evaluate log likelihood
-@partial(jit, static_argnums=(0, 1,))
-def log_likelihood(system, transform, y, Xi, lmbda, beta):
+@partial(jit, static_argnums=(0,))
+def log_likelihood(system, y, Xi, lmbda, beta):
+
     # map to sample from posterior
-    z = T(transform, y, lmbda)
+    z = T(y, lmbda)
 
     # unpack condition
     tf, x = Xi
 
     # likelihood
-    lp = jnp.nansum(beta * (x[1:] - model(system, Xi, z)) ** 2) / 2.
+    lp = jnp.nansum(beta * (x[-1] - model(system, Xi, z)) ** 2) / 2.
 
     return lp
 
 
 # gradient of log posterior w.r.t. variational parameters lmbda
-@partial(jit, static_argnums=(0, 1,))
-def grad_log_likelihood(system, transform, y, x, lmbda, beta):
-    return jacrev(log_likelihood, 4)(system, transform, y, x, lmbda, beta)
+@partial(jit, static_argnums=(0,))
+def grad_log_likelihood(system, y, x, lmbda, beta):
+    return jacrev(log_likelihood, 3)(system, y, x, lmbda, beta)
 
 
 # evaluate log posterior
-@partial(jit, static_argnums=(0, 1))
-def log_posterior(system, transform, y, Xi, z_prior, lmbda, alpha, beta, N):
+@partial(jit, static_argnums=(0,))
+def log_posterior(system, y, Xi, z_prior, lmbda, alpha, beta, N):
+
     # map to sample from posterior
-    z = T(transform, y, lmbda)
+    z = T(y, lmbda)
 
     # prior
     lp = jnp.sum(alpha * (z - z_prior) ** 2) / 2. / N
@@ -138,22 +129,20 @@ def log_posterior(system, transform, y, Xi, z_prior, lmbda, alpha, beta, N):
     tf, x = Xi
 
     # likelihood
-    lp += jnp.nansum(beta * (x[1:] - model(system, Xi, z)) ** 2) / 2.
+    lp += jnp.nansum(beta * (x[-1] - model(system, Xi, z)) ** 2) / 2.
 
     return lp
 
 
 # gradient of log posterior w.r.t. variational parameters lmbda
-@partial(jit, static_argnums=(0, 1,))
-def grad_log_posterior(system, transform, y, Xi, z_prior, lmbda, alpha, beta, N):
-    return jacrev(log_posterior, 5)(system, transform, y, Xi, z_prior, lmbda, alpha, beta, N)
+@partial(jit, static_argnums=(0,))
+def grad_log_posterior(system, y, Xi, z_prior, lmbda, alpha, beta, N):
+    return jacrev(log_posterior, 4)(system, y, Xi, z_prior, lmbda, alpha, beta, N)
 
 
 # evaluate log posterior
-@partial(jit, static_argnums=(0, 1))
-def log_posterior_z(system, transform, z, Xi, z_prior, alpha, beta, N):
-    # transform z
-    z = transform(z)
+@partial(jit, static_argnums=(0,))
+def log_posterior_z(system, z, Xi, z_prior, alpha, beta, N):
 
     # prior
     lp = jnp.sum(alpha * (z - z_prior) ** 2) / 2. / N
@@ -162,22 +151,20 @@ def log_posterior_z(system, transform, z, Xi, z_prior, alpha, beta, N):
     tf, x = Xi
 
     # likelihood
-    lp += jnp.nansum(beta * (x[1:] - model(system, Xi, z)) ** 2) / 2.
+    lp += jnp.nansum(beta * (x[-1] - model(system, Xi, z)) ** 2) / 2.
 
     return lp
 
 
 # gradient of log posterior w.r.t. variational parameters lmbda
-@partial(jit, static_argnums=(0, 1))
-def grad_log_posterior_z(system, transform, z, Xi, z_prior, alpha, beta, N):
-    return jacrev(log_posterior_z, 2)(system, transform, z, Xi, z_prior, alpha, beta, N)
+@partial(jit, static_argnums=(0,))
+def grad_log_posterior_z(system, z, Xi, z_prior, alpha, beta, N):
+    return jacrev(log_posterior_z, 1)(system, transform, z, Xi, z_prior, alpha, beta, N)
 
 
 # evaluate log prior
-@partial(jit, static_argnums=(0,))
-def log_prior_z(transform, z_prior, z, alpha):
-    # transform z
-    z = transform(z)
+@jit
+def log_prior_z(z_prior, z, alpha):
 
     # prior
     lp = jnp.sum(alpha * (z - z_prior) ** 2) / 2.
@@ -186,30 +173,28 @@ def log_prior_z(transform, z_prior, z, alpha):
 
 
 # gradient of log prior
-@partial(jit, static_argnums=(0,))
-def grad_log_prior_z(transform, z_prior, z, alpha):
-    return jacrev(log_prior_z, 2)(transform, z_prior, z, alpha)
+@jit
+def grad_log_prior_z(z_prior, z, alpha):
+    return jacrev(log_prior_z, 1)(z_prior, z, alpha)
 
 
 # evaluate log likelihood
-@partial(jit, static_argnums=(0, 1))
-def log_likelihood_z(system, transform, z, Xi, beta):
+@partial(jit, static_argnums=(0,))
+def log_likelihood_z(system, z, Xi, beta):
+
     # unpack condition
     tf, x = Xi
 
-    # transform z
-    z = transform(z)
-
     # likelihood
-    lp = jnp.nansum(beta * (x[1:] - model(system, Xi, z)) ** 2) / 2.
+    lp = jnp.nansum(beta * (x[-1] - model(system, Xi, z)) ** 2) / 2.
 
     return lp
 
 
 # gradient of log posterior w.r.t. variational parameters lmbda
-@partial(jit, static_argnums=(0, 1))
-def grad_log_likelihood_z(system, transform, z, x, beta):
-    return jacrev(log_likelihood_z, 2)(system, transform, z, x, beta)
+@partial(jit, static_argnums=(0,))
+def grad_log_likelihood_z(system, z, x, beta):
+    return jacrev(log_likelihood_z, 1)(system, z, x, beta)
 
 
 class ODE:
@@ -234,29 +219,67 @@ class ODE:
         # parameter prior
         self.prior_mean = prior_mean
 
-        # prior and measurement precision
-        self.alpha = alpha
-        self.beta = beta
-
         # problem dimension
         self.d = len(self.prior_mean)
 
+        # prior and measurement precision
+        self.alpha = alpha * np.ones(self.d)
+        self.beta = beta * np.ones(len(sys_vars))
+
         # initial parameter guess
         self.z = np.random.randn(self.d) / 10.
-        self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 100.))
+        self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 10.))
 
-    # negative log likelihood
-    def nll(self):
+    # reinitialize parameters
+    def init_params(self,):
+
+        # initial parameter guess
+        self.z = np.random.randn(self.d) / 10.
+        self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 10.))
+
+    # negative log posterior
+    def nlp(self, z):
 
         # prior
-        self.NLL = np.nan_to_num(log_prior_z(self.transform, self.prior_mean, self.z, self.alpha))
+        self.NLP = log_prior_z(self.prior_mean, z, self.alpha)
 
         # likelihood
         for Xi in self.X:
-            self.NLL += np.nan_to_num(log_likelihood_z(self.system, self.transform, self.z, Xi, self.beta))
+            self.NLP += log_likelihood_z(self.system, z, Xi, self.beta)
 
         # return NLP
-        return self.NLL
+        return self.NLP
+
+    # gradient of negative log posterior
+    def grad_nlp(self, z):
+
+        # prior
+        grad_NLP = grad_log_prior_z(self.prior_mean, z, self.alpha)
+
+        # likelihood
+        for Xi in self.X:
+            grad_NLP += grad_log_likelihood_z(self.system, z, Xi, self.beta)
+
+        # return NLP
+        return grad_NLP
+
+    # gradient of negative log posterior
+    def hess_nlp(self, z):
+
+        # prior
+        hess_NLP = np.diag(self.alpha)
+
+        # likelihood
+        for Xi in self.X:
+
+            # Jacobian of model
+            Gi = grad_model(self.system, Xi, z)
+
+            # outer product approximation of Hessian
+            hess_NLP += outer(self.beta, Gi)
+
+        # return NLP
+        return hess_NLP
 
     # evidence lower bound
     def elbo(self, n_sample=21):
@@ -269,11 +292,10 @@ class ODE:
         for yi in y:
 
             # entropy
-            self.ELBO -= np.nan_to_num(log_det(self.transform, yi, self.lmbda)) / n_sample
+            self.ELBO -= np.nan_to_num(log_det(yi, self.lmbda)) / n_sample
 
             # prior
-            self.ELBO += np.nan_to_num(log_prior(self.transform,
-                                                 self.prior_mean,
+            self.ELBO += np.nan_to_num(log_prior(self.prior_mean,
                                                  yi,
                                                  self.lmbda,
                                                  self.alpha)) / n_sample
@@ -281,7 +303,6 @@ class ODE:
             # likelihood
             for Xi in self.X:
                 self.ELBO += np.nan_to_num(log_likelihood(self.system,
-                                                          self.transform,
                                                           yi,
                                                           Xi,
                                                           self.lmbda,
@@ -306,7 +327,7 @@ class ODE:
             t_hat = model(self.system, Xi, self.z)
 
             # Determine error
-            Y_error = np.nan_to_num(np.nan_to_num(t_hat) - x[-1])
+            Y_error = np.nan_to_num(t_hat - x[-1])
 
             # sum of measurement error
             yCOV += Y_error ** 2
@@ -493,14 +514,12 @@ class ODE:
                 for yi in y:
 
                     # gradient of entropy
-                    gradient -= np.nan_to_num(grad_log_det(self.transform,
-                                                           yi,
-                                                           self.lmbda)) / len(self.X) / n_sample
+                    gradient -= np.nan_to_num(grad_log_det(yi, self.lmbda)) / len(self.X) / n_sample
 
                     # gradient of log posterior
                     grad_val = grad_log_posterior(self.system,
-                                                  self.transform,
-                                                  yi, self.X[sample_index],
+                                                  yi,
+                                                  self.X[sample_index],
                                                   self.prior_mean,
                                                   self.lmbda,
                                                   self.alpha, self.beta, N=len(self.X))
@@ -508,7 +527,8 @@ class ODE:
                     # ignore value for unstable parameter samples
                     # if not all(np.isnan(grad_val)):
                     #     if np.nanmax(np.abs(grad_val)) < 1000:
-                    gradient += np.nan_to_num(grad_val) / n_sample
+                    gradient += np.where(np.abs(grad_val) < 1e6, grad_val, 0.) / n_sample
+                    # gradient += np.nan_to_num(grad_val) / n_sample
 
                 # moment estimation
                 m = beta1 * m + (1 - beta1) * gradient
@@ -522,17 +542,55 @@ class ODE:
                 # take step
                 self.lmbda -= lr * m_hat / (np.sqrt(v_hat) + epsilon)
 
-    def fit_posterior_EM(self, n_sample_sgd=1, n_sample_hypers=32, n_sample_evidence=512, patience=3):
+    def callback(self, x):
+        print("Loss: {:.3f}".format(self.NLP))
 
-        # estimate model evidence
-        print("Computing model evidence...")
-        self.estimate_evidence(n_sample=n_sample_evidence)
-        print("Log evidence: {:.3f}".format(self.log_evidence))
+    def fit_posterior_EM(self, n_sample_sgd=1, n_sample_hypers=1000, n_sample_evidence=1000,
+                         trials=0, patience=1, lr=1e-2, max_iterations=100):
 
-        # optimize evidence
-        previdence = np.copy(self.log_evidence)
+        # initialize parameters over trials
+        if trials > 0:
+            param_dict = {t: {} for t in range(trials)}
+            for trial in range(trials):
+                # initialize parameters
+                print(f"Trial {trial + 1}")
+                self.init_params()
+
+                # estimate parameters using gradient descent
+                z = minimize(fun=self.nlp,
+                             jac=self.grad_nlp,
+                             hess=self.hess_nlp,
+                             x0=self.z,
+                             method='Newton-CG',
+                             callback=self.callback).x
+
+                # save optimized parameter values and associated loss
+                param_dict[trial]["NLP"] = self.NLP
+                param_dict[trial]["params"] = z
+
+            # pick the best parameter set
+            NLPs = [param_dict[trial]["NLP"] for trial in range(trials)]
+            best_trial = np.argmin(NLPs)
+            print("\nLoading model with NLP: {:.3f}".format(NLPs[best_trial]))
+            self.z = param_dict[best_trial]["params"]
+            self.lmbda = jnp.append(self.z, jnp.log2(jnp.ones(self.d) / 100.))
+            del param_dict
+        else:
+            # init params
+            self.init_params()
+
+        # optimize parameter posterior
+        print("Updating posterior...")
+        self.fit_posterior(n_sample_sgd, lr=lr)
+
+        # init evidence, fail count, iteration count
+        previdence = -np.inf
         fails = 0
-        while fails < patience:
+        t = 0
+        while fails < patience and t < max_iterations:
+
+            # update iteration count
+            t += 1
 
             # update prior and measurement precision estimate
             print("Updating hyperparameters...")
@@ -540,12 +598,11 @@ class ODE:
 
             # optimize parameter posterior
             print("Updating posterior...")
-            self.fit_posterior(n_sample_sgd)
+            self.fit_posterior(n_sample_sgd, lr=lr)
 
             # update evidence
             print("Computing model evidence...")
             self.estimate_evidence(n_sample=n_sample_evidence)
-            print("Log evidence: {:.3f}".format(self.log_evidence))
 
             # check convergence
             if self.log_evidence > previdence:
@@ -555,13 +612,13 @@ class ODE:
                 fails += 1
 
     # EM algorithm to update hyperparameters
-    def update_hypers(self, n_sample=512):
+    def update_hypers(self, n_sample=1000):
         # init yCOV
         yCOV = 0.
 
         # current parameter guess
         y = np.random.randn(n_sample, self.d)
-        z = batch_T(self.transform, y, self.lmbda)
+        z = batch_T(y, self.lmbda)
 
         # loop over each sample in dataset
         N = np.zeros(len(self.sys_vars))
@@ -574,7 +631,7 @@ class ODE:
                 t_hat = model(self.system, Xi, zi)
 
                 # Determine error
-                Y_error = np.nan_to_num(np.nan_to_num(t_hat) - x[-1])
+                Y_error = np.nan_to_num(t_hat - x[-1])
 
                 # sum of measurement error
                 yCOV += Y_error ** 2 / n_sample
@@ -587,44 +644,52 @@ class ODE:
         # print("beta:", self.beta)
 
         # update alpha
-        self.alpha = 1. / np.mean((z - self.prior_mean) ** 2, 0)
-        # self.alpha = self.d * n_sample / np.sum((z - self.prior_mean) ** 2)
+        # self.alpha = 1. / np.mean((z - self.prior_mean) ** 2, 0)
+        self.alpha = self.d * n_sample / np.sum((z - self.prior_mean) ** 2)
         # print("alpha:", self.alpha)
 
-    def estimate_evidence(self, n_sample=512):
+    def estimate_evidence(self, n_sample=1000, n_trials=1):
 
-        # sample from prior
-        y = np.random.randn(n_sample, self.d)
-        z = self.prior_mean + np.sqrt(1. / self.alpha) * y
+        # compute evidence several times to reduce noise
+        log_evidence_vals = []
+        for trial in range(n_trials):
 
-        # init log likelihoods
-        log_likelihoods = []
+            # sample from prior
+            y = np.random.randn(n_sample, self.d)
+            z = self.prior_mean + np.sqrt(1. / self.alpha) * y
 
-        # for each parameter sample
-        for zi in tqdm(z):
+            # init log likelihoods
+            log_likelihoods = []
 
-            # for each datapoint
-            log_likelihood_val = 0.
-            for Xi in self.X:
-                # predict condition
-                tf, x = Xi
+            # for each parameter sample
+            for zi in tqdm(z):
 
-                # integrate ODE
-                t_hat = np.nan_to_num(model(self.system, Xi, zi))
+                # for each datapoint
+                log_likelihood_val = 0.
+                for Xi in self.X:
+                    # predict condition
+                    tf, x = Xi
 
-                # Compute likelihood
-                log_likelihood_val += .5 * np.sum(np.log(self.beta)) - .5 * len(self.sys_vars) * np.log(2 * np.pi)
-                log_likelihood_val += -.5 * np.nansum(self.beta * (x[1:] - t_hat) ** 2)
+                    # integrate ODE
+                    t_hat = model(self.system, Xi, zi)
 
-            # append log_likelihood for parameter sample
-            log_likelihoods.append(log_likelihood_val)
+                    # Compute likelihood
+                    log_likelihood_val += .5 * np.sum(np.log(self.beta)) - .5 * len(self.sys_vars) * np.log(2 * np.pi)
+                    log_likelihood_val -= .5 * np.nansum(self.beta * (x[-1] - t_hat) ** 2)
 
-        # compute log evidence
-        self.log_evidence = logsumexp(log_likelihoods) - np.log(n_sample)
+                # append log_likelihood for parameter sample
+                log_likelihoods.append(log_likelihood_val)
+
+            # compute log evidence
+            log_evidence_vals.append(logsumexp(log_likelihoods) - np.log(n_sample))
+
+        # save average evidence
+        self.log_evidence = np.mean(log_evidence_vals)
+        print("Log evidence: {:.3f} +/- {:.3f}".format(self.log_evidence, np.std(log_evidence_vals)))
 
     def predict_point(self, x0, t_eval):
 
-        z = T(self.transform, np.zeros(self.d), self.lmbda)
+        z = T(np.zeros(self.d), self.lmbda)
 
         return odeint(self.system, x0, t_eval, z)
 
@@ -636,7 +701,20 @@ class ODE:
         # posterior predictive
         predictions = []
         for yi in y:
-            zi = T(self.transform, yi, self.lmbda)
+            zi = T(yi, self.lmbda)
+            predictions.append(odeint(self.system, x0, t_eval, zi))
+
+        return np.stack(predictions)
+
+    def predict_prior(self, x0, t_eval, n_sample=21):
+
+        # sample from prior
+        y = np.random.randn(n_sample, self.d)
+        z = self.prior_mean + np.sqrt(1. / self.alpha) * y
+
+        # posterior predictive
+        predictions = []
+        for zi in z:
             predictions.append(odeint(self.system, x0, t_eval, zi))
 
         return np.stack(predictions)
@@ -651,11 +729,11 @@ class ODE:
 
     def param_df(self, n_sample=1000):
         # get mean of transformed parameter value
-        mean = T(self.transform, np.zeros(self.d), self.lmbda)
+        mean = self.transform(T(np.zeros(self.d), self.lmbda))
 
         # standard deviation
         y = np.random.randn(n_sample, self.d)
-        z = batch_T(self.transform, y, self.lmbda)
+        z = vmap(self.transform)(batch_T(y, self.lmbda))
         stdv = np.std(z, 0)
 
         # save parameter dataframe
