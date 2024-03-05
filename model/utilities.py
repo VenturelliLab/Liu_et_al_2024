@@ -36,7 +36,7 @@ def lin_fit(x, a, b):
 
 
 def check_convergence(f):
-    p, cov = curve_fit(lin_fit, xdata=np.arange(len(f)), ydata=f / np.max(f), p0=[1., 0.])
+    p, cov = curve_fit(lin_fit, xdata=np.arange(len(f)), ydata=f / np.max(np.abs(f)), p0=[1., 0.])
     a, b, = p
 
     # return value of slope

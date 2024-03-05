@@ -545,6 +545,54 @@ class ODE:
     def callback(self, x):
         print("Loss: {:.3f}".format(self.NLP))
 
+    def Newton(self, z, lr=.01, tol=1e-3, patience=3, max_iterations=1000):
+
+        # adaptive step size Newton optimization algorithm
+        NLP = np.inf
+        z_star = np.copy(z)
+        passes = 0
+        t = 0
+        while t < max_iterations and passes < patience:
+            # number of iterations
+            t += 1
+
+            # evaluate gradient
+            g = self.grad_nlp(z)
+
+            # evaluate Hessian
+            H = self.hess_nlp(z)
+
+            # solve for step direction
+            d = lin_solve(H, g)
+
+            # take step
+            z -= lr * d
+
+            # evaluate convergence
+            self.nlp(z)
+            convergence = (NLP - self.NLP) / np.abs(self.NLP)
+            print("Epoch: {:}, NLP: {:.3f}, Convergence: {:.5f}".format(t, self.NLP, convergence))
+
+            if convergence < 0:
+                # give up and return best parameters
+                return z_star
+            else:
+                # update previous best params
+                z_star = np.copy(z)
+                self.nlp(z_star)
+
+            if abs(convergence) < tol:
+                passes += 1
+                # try increasing learning rate if convergence is small
+                lr *= 1.5
+                print("Pass count {:}, Set lr to {:.5f}".format(passes, lr))
+
+            # update NLP
+            NLP = np.copy(self.NLP)
+
+        # return optimized parameters
+        return z_star
+
     def fit_posterior_EM(self, n_sample_sgd=3, n_sample_hypers=1000, n_sample_evidence=1000,
                          trials=3, patience=1, lr=1e-3, max_iterations=100):
 
@@ -556,13 +604,14 @@ class ODE:
                 print(f"Trial {trial + 1}")
                 self.init_params()
 
-                # estimate parameters using gradient descent
-                z = minimize(fun=self.nlp,
-                             jac=self.grad_nlp,
-                             hess=self.hess_nlp,
-                             x0=self.z,
-                             method='Newton-CG',
-                             callback=self.callback).x
+                # # estimate parameters using gradient descent
+                # z = minimize(fun=self.nlp,
+                #              jac=self.grad_nlp,
+                #              hess=self.hess_nlp,
+                #              x0=self.z,
+                #              method='Newton-CG',
+                #              callback=self.callback).x
+                z = self.Newton(self.z)
 
                 # save optimized parameter values and associated loss
                 param_dict[trial]["NLP"] = self.NLP
