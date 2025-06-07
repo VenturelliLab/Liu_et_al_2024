@@ -2,7 +2,7 @@
 
 # Liu_et_al_2024
 Model fitting codes implemented in Liu et al 2024 "Shaping human gut community assembly and butyrate production by controlling the arginine dihydrolase pathway". \
-DOI: https://doi.org/10.1101/2023.01.10.52344 \
+DOI: https://doi.org/10.1016/j.cels.2025.101292 \
 MiRNN Fit.ipynb fits parameters to all monoculture and community data. \
 MiRNN Plot Fit.ipynb plots model fitting results. \
 MiRNN Comm LOO.ipynb evaluates model prediction performance by leave-one-out cross-validation. \
